@@ -19,6 +19,7 @@ ARG USE_AUXILIARY_EMBEDDING_MODEL=TaylorAI/bge-micro-v2
 ARG USE_TIKTOKEN_ENCODING_NAME="cl100k_base"
 
 ARG BUILD_HASH=dev-build
+ARG WEBUI_BASE_PATH=/open-webui
 # Override at your own risk - non-root configurations are untested
 ARG UID=0
 ARG GID=0
@@ -26,6 +27,7 @@ ARG GID=0
 ######## WebUI frontend ########
 FROM --platform=$BUILDPLATFORM node:22-alpine3.20 AS build
 ARG BUILD_HASH
+ARG WEBUI_BASE_PATH
 
 # Set Node.js options (heap limit Allocation failed - JavaScript heap out of memory)
 # ENV NODE_OPTIONS="--max-old-space-size=4096"
@@ -40,6 +42,7 @@ RUN npm ci --force
 
 COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
+ENV WEBUI_BASE_PATH=${WEBUI_BASE_PATH}
 RUN npm run build
 
 ######## WebUI backend ########

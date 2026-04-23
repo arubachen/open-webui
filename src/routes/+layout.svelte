@@ -1,4 +1,5 @@
 <script>
+	import { dev } from '$app/environment';
 	import { io } from 'socket.io-client';
 	import { spring } from 'svelte/motion';
 	import PyodideWorker from '$lib/workers/pyodide.worker?worker';
@@ -62,7 +63,7 @@
 		removeTerminalConnection
 	} from '$lib/utils/connections';
 
-	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL, WEBUI_HOSTNAME } from '$lib/constants';
+	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { bestMatchingLanguage, displayFileHandler, getUserTimezone } from '$lib/utils';
 	import { setTextScale } from '$lib/utils/text-scale';
 
@@ -70,7 +71,14 @@
 	import AppSidebar from '$lib/components/app/AppSidebar.svelte';
 	import SyncStatsModal from '$lib/components/chat/Settings/SyncStatsModal.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
-	import { getUserSettings } from '$lib/apis/users';
+	import { getUserSettings, updateUserSettings } from '$lib/apis/users';
+	import {
+		captureJuliuDirectConnectionFromHref,
+		clearPendingJuliuDirectConnection,
+		getPendingJuliuDirectConnection,
+		mergeJuliuDirectConnectionSettings,
+		storePendingJuliuDirectConnection
+	} from '$lib/utils/juliu-direct-connection';
 	import dayjs from 'dayjs';
 	import { getChannels } from '$lib/apis/channels';
 
@@ -113,12 +121,14 @@
 	const BREAKPOINT = 768;
 
 	const setupSocket = async (enableWebsocket) => {
-		const _socket = io(`${WEBUI_BASE_URL}` || undefined, {
+		const socketOrigin = dev ? `${WEBUI_BASE_URL}` || undefined : undefined;
+		const socketPath = `${dev ? '' : WEBUI_BASE_URL}/ws/socket.io` || '/ws/socket.io';
+		const _socket = io(socketOrigin, {
 			reconnection: true,
 			reconnectionDelay: 1000,
 			reconnectionDelayMax: 5000,
 			randomizationFactor: 0.5,
-			path: '/ws/socket.io',
+			path: socketPath,
 			transports: enableWebsocket ? ['websocket'] : ['polling', 'websocket'],
 			auth: { token: localStorage.token }
 		});
@@ -204,6 +214,59 @@
 				console.log('Additional details:', details);
 			}
 		});
+	};
+
+	const capturePendingJuliuDirectConnection = () => {
+		if (typeof window === 'undefined') return;
+
+		const { payload, cleanedUrl } = captureJuliuDirectConnectionFromHref(window.location.href);
+		if (!payload) {
+			return;
+		}
+
+		storePendingJuliuDirectConnection(sessionStorage, payload);
+
+		const currentRelativeUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+		if (cleanedUrl !== currentRelativeUrl) {
+			window.history.replaceState(window.history.state, '', cleanedUrl);
+		}
+	};
+
+	const applyPendingJuliuDirectConnection = async () => {
+		if (typeof window === 'undefined') return;
+
+		const pending = getPendingJuliuDirectConnection(sessionStorage);
+		if (!pending) {
+			return;
+		}
+
+		const { settings: mergedSettings, changed } = mergeJuliuDirectConnectionSettings(
+			$settings ?? {},
+			pending
+		);
+
+		clearPendingJuliuDirectConnection(sessionStorage);
+
+		if (!changed) {
+			return;
+		}
+
+		settings.set(mergedSettings);
+		localStorage.setItem('settings', JSON.stringify(mergedSettings));
+
+		if (localStorage.token) {
+			try {
+				await updateUserSettings(localStorage.token, { ui: mergedSettings });
+			} catch (error) {
+				console.error('Failed to persist imported Juliu connection', error);
+			}
+
+			try {
+				models.set(await getModels(localStorage.token, mergedSettings.directConnections ?? null));
+			} catch (error) {
+				console.error('Failed to refresh models after Juliu connection import', error);
+			}
+		}
 	};
 
 	/**
@@ -848,6 +911,7 @@
 	};
 
 	onMount(async () => {
+		capturePendingJuliuDirectConnection();
 		window.addEventListener('message', windowMessageEventHandler);
 
 		let touchstartY = 0;
@@ -965,6 +1029,7 @@
 				} else {
 					settings.set(JSON.parse(localStorage.getItem('settings') ?? '{}'));
 				}
+				await applyPendingJuliuDirectConnection();
 				setTextScale($settings?.textScale ?? 1);
 
 				// Set up the token expiry check
