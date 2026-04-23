@@ -15,7 +15,7 @@
 	import { getTerminalServers } from '$lib/apis/terminal';
 	import { getUserSettings } from '$lib/apis/users';
 
-	import { WEBUI_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
+	import { WEBUI_VERSION, WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { compareVersion } from '$lib/utils';
 
 	import {
@@ -50,6 +50,8 @@
 	import { Shortcut, shortcuts } from '$lib/shortcuts';
 
 	const i18n = getContext('i18n');
+	const prefixedRoute = (path: string) =>
+		`${WEBUI_BASE_URL.startsWith('http') ? '' : WEBUI_BASE_URL}${path}`;
 
 	let loaded = false;
 	let DB = null;
@@ -194,7 +196,7 @@
 
 	onMount(async () => {
 		if ($user === undefined || $user === null) {
-			await goto('/auth');
+			await goto(prefixedRoute('/auth'));
 			return;
 		}
 		if (!['user', 'admin'].includes($user?.role)) {

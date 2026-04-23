@@ -32,6 +32,8 @@
 	let loaded = false;
 
 	let mode = $config?.features.enable_ldap ? 'ldap' : 'signin';
+	const prefixedRoute = (path: string) =>
+		`${WEBUI_BASE_URL.startsWith('http') ? '' : WEBUI_BASE_URL}${path}`;
 
 	let form = null;
 
@@ -60,7 +62,7 @@
 			}
 
 			if (!redirectPath) {
-				redirectPath = $page.url.searchParams.get('redirect') || '/';
+				redirectPath = $page.url.searchParams.get('redirect') || prefixedRoute('/');
 			}
 
 			goto(redirectPath);
@@ -168,7 +170,7 @@
 	onMount(async () => {
 		const redirectPath = $page.url.searchParams.get('redirect');
 		if ($user !== undefined) {
-			goto(redirectPath || '/');
+			goto(redirectPath || prefixedRoute('/'));
 		} else {
 			if (redirectPath) {
 				localStorage.setItem('redirectPath', redirectPath);

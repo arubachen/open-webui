@@ -119,6 +119,8 @@
 	let heartbeatInterval = null;
 
 	const BREAKPOINT = 768;
+	const prefixedRoute = (path) =>
+		`${WEBUI_BASE_URL.startsWith('http') ? '' : WEBUI_BASE_URL}${path}`;
 
 	const setupSocket = async (enableWebsocket) => {
 		const socketOrigin = dev ? `${WEBUI_BASE_URL}` || undefined : undefined;
@@ -804,7 +806,7 @@
 			user.set(null);
 			localStorage.removeItem('token');
 
-			location.href = res?.redirect_url ?? '/auth';
+			location.href = res?.redirect_url ?? prefixedRoute('/auth');
 		}
 	};
 
@@ -1116,19 +1118,19 @@
 					} else {
 						// Redirect Invalid Session User to /auth Page
 						localStorage.removeItem('token');
-						await goto(`/auth?redirect=${encodedUrl}`);
+						await goto(`${prefixedRoute('/auth')}?redirect=${encodedUrl}`);
 					}
 				} else {
 					// Don't redirect if we're already on the auth page
 					// Needed because we pass in tokens from OAuth logins via URL fragments
-					if ($page.url.pathname !== '/auth') {
-						await goto(`/auth?redirect=${encodedUrl}`);
+					if ($page.url.pathname !== prefixedRoute('/auth')) {
+						await goto(`${prefixedRoute('/auth')}?redirect=${encodedUrl}`);
 					}
 				}
 			}
 		} else {
 			// Redirect to /error when Backend Not Detected
-			await goto(`/error`);
+			await goto(prefixedRoute('/error'));
 		}
 
 		await tick();
