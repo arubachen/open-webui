@@ -1302,7 +1302,7 @@ async def embeddings(request: Request, form_data: dict, user):
         if 'text/event-stream' in r.headers.get('Content-Type', ''):
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r),
+                stream_wrapper(r, content_handler=stream_chunks_handler),
                 status_code=r.status,
                 headers=dict(r.headers),
             )
@@ -1423,7 +1423,7 @@ async def responses(
         if 'text/event-stream' in r.headers.get('Content-Type', ''):
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r),
+                stream_wrapper(r, content_handler=stream_chunks_handler),
                 status_code=r.status,
                 headers=dict(r.headers),
             )
@@ -1540,7 +1540,7 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
         if 'text/event-stream' in r.headers.get('Content-Type', ''):
             streaming = True
             return StreamingResponse(
-                stream_wrapper(r),
+                stream_wrapper(r, content_handler=stream_chunks_handler),
                 status_code=r.status,
                 headers=dict(r.headers),
             )

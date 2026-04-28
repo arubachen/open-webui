@@ -949,7 +949,12 @@ def stream_chunks_handler(stream: aiohttp.StreamReader):
 
     max_buffer_size = CHAT_STREAM_RESPONSE_CHUNK_MAX_BUFFER_SIZE
     if max_buffer_size is None or max_buffer_size <= 0:
-        return stream
+        async def yield_raw_stream_chunks():
+            async for data, _ in stream.iter_chunks():
+                if data:
+                    yield data
+
+        return yield_raw_stream_chunks()
 
     async def yield_safe_stream_chunks():
         buffer = b''
