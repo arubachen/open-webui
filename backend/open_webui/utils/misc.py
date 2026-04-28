@@ -939,24 +939,19 @@ async def stream_wrapper(response, session, content_handler=None):
 
 def stream_chunks_handler(stream: aiohttp.StreamReader):
     """
-    Handle stream response chunks, supporting large data chunks that exceed the original 16kb limit.
-    When a single line exceeds max_buffer_size, returns an empty JSON string {} and skips subsequent data
-    until encountering normally sized data.
+    Yield complete SSE/text lines without using aiohttp's readline iterator.
 
-    :param stream: The stream reader to handle.
-    :return: An async generator that yields the stream data.
+    aiohttp's line iterator can raise "Got more than 131072 bytes" when a
+    provider streams a very large SSE data line (for example Responses API image
+    generation events).  Downstream Open WebUI middleware still expects complete
+    ``data: ...`` lines, so raw TCP chunks are not safe: JSON events can be split
+    and silently ignored.  This custom splitter preserves line framing while
+    avoiding aiohttp's fixed readline limit.
     """
 
     max_buffer_size = CHAT_STREAM_RESPONSE_CHUNK_MAX_BUFFER_SIZE
-    if max_buffer_size is None or max_buffer_size <= 0:
-        async def yield_raw_stream_chunks():
-            async for data, _ in stream.iter_chunks():
-                if data:
-                    yield data
 
-        return yield_raw_stream_chunks()
-
-    async def yield_safe_stream_chunks():
+    async def yield_stream_lines():
         buffer = b''
         skip_mode = False
 
@@ -964,44 +959,43 @@ def stream_chunks_handler(stream: aiohttp.StreamReader):
             if not data:
                 continue
 
-            # In skip_mode, if buffer already exceeds the limit, clear it (it's part of an oversized line)
-            if skip_mode and len(buffer) > max_buffer_size:
-                buffer = b''
-
             lines = (buffer + data).split(b'\n')
 
-            # Process complete lines (except the last possibly incomplete fragment)
-            for i in range(len(lines) - 1):
-                line = lines[i]
+            # Process complete lines (except the final incomplete fragment).
+            for line in lines[:-1]:
+                if max_buffer_size is not None and max_buffer_size > 0:
+                    if skip_mode:
+                        if len(line) <= max_buffer_size:
+                            skip_mode = False
+                            yield line + b'\n'
+                        else:
+                            yield b'data: {}\n'
+                        continue
 
-                if skip_mode:
-                    # Skip mode: check if current line is small enough to exit skip mode
-                    if len(line) <= max_buffer_size:
-                        skip_mode = False
-                        yield line
-                    else:
-                        yield b'data: {}\n'
-                else:
-                    # Normal mode: check if line exceeds limit
                     if len(line) > max_buffer_size:
                         skip_mode = True
                         yield b'data: {}\n'
                         log.info(f'Skip mode triggered, line size: {len(line)}')
-                    else:
-                        yield line + b'\n'
+                        continue
 
-            # Save the last incomplete fragment
+                yield line + b'\n'
+
             buffer = lines[-1]
 
-            # Check if buffer exceeds limit
-            if not skip_mode and len(buffer) > max_buffer_size:
+            # Optional legacy protection for deployments that set a max line
+            # size.  By default there is no max, because Responses image final
+            # events legitimately carry multi-megabyte base64 payloads.
+            if (
+                max_buffer_size is not None
+                and max_buffer_size > 0
+                and not skip_mode
+                and len(buffer) > max_buffer_size
+            ):
                 skip_mode = True
                 log.info(f'Skip mode triggered, buffer size: {len(buffer)}')
-                # Clear oversized buffer to prevent unlimited growth
                 buffer = b''
 
-        # Process remaining buffer data
         if buffer and not skip_mode:
             yield buffer + b'\n'
 
-    return yield_safe_stream_chunks()
+    return yield_stream_lines()

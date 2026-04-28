@@ -12,6 +12,7 @@ from typing import Any, Optional
 import random
 import json
 import html
+import hashlib
 import inspect
 import re
 import ast
@@ -849,9 +850,20 @@ def handle_responses_streaming_event(
                             return new_output, {}
                 return current_output, None
 
-            # 2. Skip Output Item done (handled specifically below)
+            # 2. Output item done carries finalized non-text items such as
+            # image_generation_call. Handle it here because the generic
+            # ``*.done`` branch catches response.output_item.done before the
+            # more specific branch below can run.
             if type_name == 'output_item':
-                pass
+                item = data.get('item')
+                output_index = data.get('output_index', len(current_output) - 1)
+
+                new_output = list(current_output)
+                if item and 0 <= output_index < len(current_output):
+                    new_output[output_index] = item
+                elif item:
+                    new_output.append(item)
+                return new_output, {} if item else None
 
             # 3. Generic Field Done (text.done, audio.done)
             elif type_name not in ['completed', 'failed']:
@@ -915,7 +927,16 @@ def handle_responses_streaming_event(
         response_data = data.get('response', {})
         final_output = response_data.get('output')
 
-        new_output = final_output if final_output is not None else current_output
+        if final_output:
+            new_output = final_output
+        elif final_output == [] and current_output:
+            # Some compatible gateways send an empty final response.output while
+            # earlier response.output_item.done events carried the real item
+            # (notably image_generation_call). Preserve the accumulated output
+            # instead of wiping the assistant message back to empty.
+            new_output = current_output
+        else:
+            new_output = final_output if final_output is not None else current_output
 
         # Ensure reasoning items are marked as completed in the final output
         if new_output:
@@ -3734,6 +3755,88 @@ async def streaming_chat_response_handler(response, ctx):
             def full_output():
                 return prior_output + output if prior_output else output
 
+            response_image_urls_by_key = {}
+
+            def response_image_generation_key(item: dict) -> str | None:
+                for key in ('id', 'item_id', 'call_id'):
+                    value = item.get(key)
+                    if value:
+                        return str(value)
+
+                result = item.get('result')
+                if isinstance(result, str) and result:
+                    return 'sha256:' + hashlib.sha256(result.encode('utf-8')).hexdigest()
+
+                return None
+
+            async def persist_response_image_generation_calls(items: list[dict]):
+                image_file_list = []
+
+                for item in items:
+                    if not isinstance(item, dict) or item.get('type') != 'image_generation_call':
+                        continue
+
+                    key = response_image_generation_key(item)
+                    if key and key in response_image_urls_by_key:
+                        item['open_webui_url'] = response_image_urls_by_key[key]
+                        # Do not keep multi-megabyte base64 payloads in chat output once uploaded.
+                        item.pop('result', None)
+                        continue
+
+                    result = item.get('result')
+                    if not isinstance(result, str) or not result:
+                        continue
+
+                    image_format = (item.get('output_format') or item.get('format') or 'png').lower()
+                    if image_format == 'jpg':
+                        image_format = 'jpeg'
+
+                    image_data_url = (
+                        result
+                        if result.startswith('data:image/')
+                        else f'data:image/{image_format};base64,{result}'
+                    )
+
+                    try:
+                        image_url = await get_image_url_from_base64(
+                            request,
+                            image_data_url,
+                            metadata,
+                            user,
+                        )
+                    except Exception as e:
+                        log.warning('Failed to persist Responses image generation result: %s', e)
+                        image_url = None
+
+                    if not image_url:
+                        continue
+
+                    if key:
+                        response_image_urls_by_key[key] = image_url
+
+                    item['open_webui_url'] = image_url
+                    item.pop('result', None)
+                    image_file_list.append({'type': 'image', 'url': image_url})
+
+                if image_file_list:
+                    message_files = await Chats.add_message_files_by_id_and_message_id(
+                        metadata['chat_id'],
+                        metadata['message_id'],
+                        image_file_list,
+                    )
+                    if message_files is None:
+                        message_files = image_file_list
+
+                    await event_emitter(
+                        {
+                            # Files are already persisted above. Use the UI-only
+                            # event to avoid the socket-layer 'files' handler
+                            # appending the same file to the DB a second time.
+                            'type': 'chat:message:files',
+                            'data': {'files': message_files},
+                        }
+                    )
+
             reasoning_tags_param = metadata.get('params', {}).get('reasoning_tags')
             DETECT_REASONING_TAGS = reasoning_tags_param is not False
             DETECT_CODE_INTERPRETER = metadata.get('features', {}).get('code_interpreter', False)
@@ -3841,6 +3944,7 @@ async def streaming_chat_response_handler(response, ctx):
                                 # Check for Responses API events (type field starts with "response.")
                                 elif data.get('type', '').startswith('response.'):
                                     output, response_metadata = handle_responses_streaming_event(data, output)
+                                    await persist_response_image_generation_calls(output)
 
                                     # Emit citation sources from finalized output items
                                     # (mirrors Chat Completions annotation handling at delta level)
@@ -3896,6 +4000,23 @@ async def streaming_chat_response_handler(response, ctx):
                                                 last_response_id = response_id
                                         processed_data.update(response_metadata)
                                         processed_data.pop('done', None)
+
+                                    if processed_data.get('usage'):
+                                        usage = processed_data.get('usage')
+
+                                    if ENABLE_REALTIME_CHAT_SAVE:
+                                        save_data = {
+                                            'content': processed_data.get('content', ''),
+                                            'output': processed_data.get('output', []),
+                                        }
+                                        if processed_data.get('usage'):
+                                            save_data['usage'] = processed_data.get('usage')
+
+                                        await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                            metadata['chat_id'],
+                                            metadata['message_id'],
+                                            save_data,
+                                        )
 
                                     await event_emitter(
                                         {
@@ -4904,6 +5025,8 @@ async def streaming_chat_response_handler(response, ctx):
                 for item in output:
                     if item.get('status') == 'in_progress':
                         item['status'] = 'completed'
+
+                await persist_response_image_generation_calls(output)
 
                 title = await Chats.get_chat_title_by_id(metadata['chat_id'])
                 data = {
